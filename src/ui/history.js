@@ -4,6 +4,7 @@ const root = document.documentElement;
 const listEl = document.getElementById("history-list");
 const searchEl = document.getElementById("search");
 const typeFilterEl = document.getElementById("typeFilter");
+const tabFilterEl = document.getElementById("tabFilter");
 const clearAllBtn = document.getElementById("clearAll");
 const exportBtn = document.getElementById("exportAll");
 const totalCountEl = document.getElementById("totalCount");
@@ -18,7 +19,18 @@ let settings = {};
 let query = "";
 let typeFilter = "all";
 
+const urlParams = new URLSearchParams(window.location.search);
+const targetTabId = urlParams.has("tabId") ? parseInt(urlParams.get("tabId"), 10) : null;
+let tabFilter = targetTabId !== null ? "current" : "all";
+
+if (targetTabId !== null) {
+    tabFilterEl.style.display = "flex";
+}
+
 function matches(entry) {
+    if (tabFilter === "current" && targetTabId !== null && entry.tabId !== targetTabId) {
+        return false;
+    }
     const type = normalizeType((manifests(entry)[0] || {}).type);
     if (typeFilter !== "all" && type !== typeFilter)
         return false;
@@ -69,6 +81,19 @@ searchEl.addEventListener("input", () => {
     render();
 });
 
+// Tab filter
+if (tabFilterEl) {
+    tabFilterEl.addEventListener("click", (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        tabFilter = btn.dataset.tab;
+        tabFilterEl.querySelectorAll(".filter-btn").forEach((b) =>
+            b.classList.toggle("active", b === btn)
+        );
+        render();
+    });
+}
+
 // Type filter
 typeFilterEl.addEventListener("click", (e) => {
     const btn = e.target.closest(".filter-btn");
@@ -82,26 +107,39 @@ typeFilterEl.addEventListener("click", (e) => {
 });
 
 exportBtn.addEventListener("click", () => {
-    chrome.storage.local.get(null, (map) => {
-        const blob = new Blob([JSON.stringify(map)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "widevineproxy2-keys.json";
-        document.body.append(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const exportData = {};
+    entries.filter(matches).forEach(e => {
+        exportData[e.pssh_data] = e;
     });
+    const blob = new Blob([JSON.stringify(exportData, null, 4)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "widevineproxy2-keys.json";
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-// Clear all - wipes chrome.storage.local
 clearAllBtn.addEventListener("click", () => {
-    if (!entries.length)
-        return;
-    if (!window.confirm("Delete all " + entries.length + " stored key entries?"))
-        return;
-    chrome.storage.local.clear(() => { entries = []; render(); });
+    const shown = entries.filter(matches);
+    if (!shown.length) return;
+
+    const msg = shown.length === entries.length
+        ? "Delete all " + entries.length + " stored key entries?"
+        : "Delete the " + shown.length + " currently filtered key entries?";
+
+    if (!window.confirm(msg)) return;
+
+    if (shown.length === entries.length) {
+        chrome.storage.local.clear(() => { entries = []; render(); });
+    } else {
+        const keysToRemove = shown.map(e => e.pssh_data);
+        chrome.storage.local.remove(keysToRemove, () => {
+            loadKeys();
+        });
+    }
 });
 
 // Live-update while the page is open.

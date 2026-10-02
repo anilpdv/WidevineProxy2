@@ -64,6 +64,182 @@ onMessage("MANIFEST_URL", async (data) => {
     }
 })
 
+// Auto-Navigation & Auto-Skip logic
+let currentAutoUrl = window.location.href;
+let skipTimer = null;
+let autoNextClickedForUrl = false;
+let isVideoDetected = false;
+let isEmeDetected = false;
+let videoObserver = null;
+let videoCheckInterval = null;
+
+function doClickNext(selector, reason) {
+    if (!selector) return false;
+    const element = document.querySelector(selector);
+    if (element) {
+        if (element.disabled || element.getAttribute('aria-disabled') === 'true') {
+            return false;
+        }
+        console.log(`WidevineProxy2: Auto-next clicking selector (${reason})`, selector);
+        const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+        events.forEach(type => {
+            element.dispatchEvent(new MouseEvent(type, {
+                view: window,
+                bubbles: true,
+                cancelable: true,
+                buttons: 1
+            }));
+        });
+        try {
+            element.click();
+        } catch (e) {}
+        return true;
+    }
+    return false;
+}
+
+function tryPlayVideo(video) {
+    if (!video || video.ended) return;
+    if (video.paused) {
+        const p = video.play();
+        if (p !== undefined) {
+            p.catch(() => {
+                // If browser blocks unmuted autoplay in background, mute and retry
+                video.muted = true;
+                video.play().catch(() => {});
+            });
+        }
+    }
+}
+
+function markVideoDetected(video) {
+    isVideoDetected = true;
+    if (skipTimer) {
+        clearTimeout(skipTimer);
+        skipTimer = null;
+    }
+    if (video) {
+        tryPlayVideo(video);
+    }
+}
+
+async function initAutoNavigation() {
+    if (window !== window.top) return;
+
+    if (skipTimer) {
+        clearTimeout(skipTimer);
+        skipTimer = null;
+    }
+    if (videoObserver) {
+        videoObserver.disconnect();
+        videoObserver = null;
+    }
+    if (videoCheckInterval) {
+        clearInterval(videoCheckInterval);
+        videoCheckInterval = null;
+    }
+
+    autoNextClickedForUrl = false;
+    isVideoDetected = false;
+    isEmeDetected = false;
+
+    const settings = await chrome.storage.sync.get(["auto_next", "auto_next_selector", "auto_next_skip"]);
+    if (!settings || !settings.auto_next || !settings.auto_next_selector) {
+        return;
+    }
+
+    // 1. Check if video element already exists on the page
+    const existingVideo = document.querySelector("video");
+    if (existingVideo) {
+        markVideoDetected(existingVideo);
+        return;
+    }
+
+    // 2. Observe DOM for video element mounting (common in single-page apps like Udemy)
+    videoObserver = new MutationObserver(() => {
+        const vid = document.querySelector("video");
+        if (vid) {
+            markVideoDetected(vid);
+            if (videoObserver) {
+                videoObserver.disconnect();
+                videoObserver = null;
+            }
+        }
+    });
+    videoObserver.observe(document.body || document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+
+    // 3. Short periodic check for video in the first few seconds
+    let pollCount = 0;
+    videoCheckInterval = setInterval(() => {
+        const vid = document.querySelector("video");
+        if (vid) {
+            markVideoDetected(vid);
+            clearInterval(videoCheckInterval);
+            videoCheckInterval = null;
+        } else if (++pollCount > 10) {
+            clearInterval(videoCheckInterval);
+            videoCheckInterval = null;
+        }
+    }, 500);
+
+    // 4. Non-video auto-skip timeout
+    const skipSeconds = Math.max(0, parseInt(settings.auto_next_skip, 10) || 0);
+    if (skipSeconds > 0) {
+        // If URL explicitly indicates a quiz/practice test, wait skipSeconds.
+        // If it's a lecture/video page, wait at least 4s grace period before concluding no video exists.
+        const isExplicitNonVideo = /\/(quiz|practice|exercise)\//i.test(window.location.href);
+        const waitMs = isExplicitNonVideo ? (skipSeconds * 1000) : (Math.max(skipSeconds, 4) * 1000);
+
+        skipTimer = setTimeout(() => {
+            const vid = document.querySelector("video");
+            if (vid || isVideoDetected || isEmeDetected) {
+                if (vid) markVideoDetected(vid);
+                return;
+            }
+
+            if (currentAutoUrl === window.location.href && !autoNextClickedForUrl) {
+                console.log(`WidevineProxy2: Auto-skip triggered after non-video timeout (${waitMs}ms) for`, currentAutoUrl);
+
+                let attempts = 0;
+                const tryClick = setInterval(() => {
+                    if (currentAutoUrl !== window.location.href || autoNextClickedForUrl) {
+                        clearInterval(tryClick);
+                        return;
+                    }
+                    if (doClickNext(settings.auto_next_selector, "non-video skip timeout")) {
+                        autoNextClickedForUrl = true;
+                        clearInterval(tryClick);
+                    } else if (++attempts > 20) {
+                        clearInterval(tryClick);
+                        console.log("WidevineProxy2: Auto-skip element not found after retries", settings.auto_next_selector);
+                    }
+                }, 500);
+            }
+        }, waitMs);
+    }
+}
+
+if (window === window.top) {
+    initAutoNavigation();
+
+    setInterval(() => {
+        if (window.location.href !== currentAutoUrl) {
+            currentAutoUrl = window.location.href;
+            initAutoNavigation();
+        }
+    }, 500);
+
+    window.addEventListener("popstate", () => {
+        if (window.location.href !== currentAutoUrl) {
+            currentAutoUrl = window.location.href;
+            initAutoNavigation();
+        }
+    });
+}
+
 onMessage("KEYS", async (data) => {
     try {
         if (manifestUrls.has(data.url)) {
@@ -81,12 +257,45 @@ onMessage("KEYS", async (data) => {
         throw e;
     }
 
-    await chrome.storage.local.set({ [data.pssh_data]: data })
+    try {
+        const tabRes = await chrome.runtime.sendMessage({ type: "GET_TAB_ID" });
+        if (tabRes && tabRes.data) {
+            data.tabId = tabRes.data;
+        }
+    } catch(e) {}
+
+    await chrome.storage.local.set({ [data.pssh_data]: data });
+
+    if (window === window.top) {
+        const settings = await chrome.storage.sync.get(["auto_next", "auto_next_selector"]);
+        if (settings && settings.auto_next && settings.auto_next_selector) {
+            autoNextClickedForUrl = true;
+            if (skipTimer) {
+                clearTimeout(skipTimer);
+                skipTimer = null;
+            }
+
+            let attempts = 0;
+            const tryClick = setInterval(() => {
+                if (doClickNext(settings.auto_next_selector, "keys fetched")) {
+                    clearInterval(tryClick);
+                } else if (++attempts > 20) {
+                    clearInterval(tryClick);
+                    console.log("WidevineProxy2: Auto-next element not found after 10 seconds", settings.auto_next_selector);
+                }
+            }, 500);
+        }
+    }
 });
 
 function onEmeStatusMessage(type) {
     onMessage(type, (data) => {
         emeStatuses[type] = data;
+        isEmeDetected = true;
+        if (skipTimer) {
+            clearTimeout(skipTimer);
+            skipTimer = null;
+        }
         chrome.runtime.sendMessage({
             type: "EME_STATUS_REACTIVE",
             payload: {
@@ -148,5 +357,103 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (Object.keys(emeStatuses).length > 0) {
             sendResponse(emeStatuses);
         }
+    } else if (message.type === "START_PICKER") {
+        if (window === window.top) {
+            startPicker();
+        }
     }
 });
+
+function getCssSelector(el) {
+    let path = [];
+    while (el && el.nodeType === Node.ELEMENT_NODE) {
+        let selector = el.tagName.toLowerCase();
+        if (el.id) {
+            selector += '#' + CSS.escape(el.id);
+            path.unshift(selector);
+            break;
+        } else if (typeof el.className === 'string' && el.className.trim()) {
+            selector += el.className.trim().split(/\s+/).map(c => '.' + CSS.escape(c)).join('');
+            path.unshift(selector);
+        } else {
+            let sib = el, nth = 1;
+            while (sib = sib.previousElementSibling) {
+                if (sib.tagName.toLowerCase() == selector) nth++;
+            }
+            if (nth != 1) selector += ":nth-of-type("+nth+")";
+            path.unshift(selector);
+        }
+        el = el.parentNode;
+    }
+    return path.join(' > ');
+}
+
+let pickerActive = false;
+function startPicker() {
+    if (pickerActive) return;
+    pickerActive = true;
+
+    const overlay = document.createElement("div");
+    overlay.style.position = "fixed";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = "100%";
+    overlay.style.height = "100%";
+    overlay.style.zIndex = "999999";
+    overlay.style.cursor = "crosshair";
+    overlay.style.background = "rgba(0,0,0,0.1)";
+    document.body.appendChild(overlay);
+
+    let lastTarget = null;
+    let originalOutline = "";
+
+    const onMouseMove = (e) => {
+        overlay.style.pointerEvents = "none";
+        const target = document.elementFromPoint(e.clientX, e.clientY);
+        overlay.style.pointerEvents = "auto";
+
+        if (target && target !== lastTarget && target !== overlay) {
+            if (lastTarget) {
+                lastTarget.style.outline = originalOutline;
+            }
+            lastTarget = target;
+            originalOutline = target.style.outline;
+            target.style.outline = "3px solid #d11124";
+        }
+    };
+
+    const onClick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (lastTarget) {
+            lastTarget.style.outline = originalOutline;
+            const selector = getCssSelector(lastTarget);
+            await chrome.storage.sync.set({ auto_next_selector: selector });
+            alert("WidevineProxy2: Auto-next selector saved as \\n" + selector);
+        }
+
+        cleanup();
+    };
+
+    const onKeyDown = (e) => {
+        if (e.key === "Escape") {
+            cleanup();
+        }
+    };
+
+    const cleanup = () => {
+        pickerActive = false;
+        if (lastTarget) {
+            lastTarget.style.outline = originalOutline;
+        }
+        overlay.remove();
+        document.removeEventListener("mousemove", onMouseMove, true);
+        overlay.removeEventListener("click", onClick, true);
+        document.removeEventListener("keydown", onKeyDown, true);
+    };
+
+    document.addEventListener("mousemove", onMouseMove, true);
+    overlay.addEventListener("click", onClick, true);
+    document.addEventListener("keydown", onKeyDown, true);
+}

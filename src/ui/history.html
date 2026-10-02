@@ -16,6 +16,10 @@
 
     <div class="toolbar">
         <input type="text" id="search" class="search" placeholder="Search URL, PSSH, kid/key, command…">
+        <div class="filters" id="tabFilter" style="display: none; margin-right: 8px;">
+            <button type="button" class="filter-btn active" data-tab="current">This Tab Only</button>
+            <button type="button" class="filter-btn" data-tab="all">All Tabs</button>
+        </div>
         <div class="filters" id="typeFilter">
             <button type="button" class="filter-btn active" data-type="all">All</button>
             <button type="button" class="filter-btn" data-type="DASH">DASH</button>

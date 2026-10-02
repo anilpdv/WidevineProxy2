@@ -40,10 +40,43 @@ function applyTheme(dark) {
     darkToggle.checked = dark;
 }
 
+const autoNextToggle = document.getElementById("autoNextToggle");
+const autoNextConfig = document.getElementById("autoNextConfig");
+const autoNextSelector = document.getElementById("autoNextSelector");
+const autoNextPick = document.getElementById("autoNextPick");
+
 applyTheme(false);
 darkToggle.addEventListener("change", () => {
     applyTheme(darkToggle.checked);
     saveSync({ dark_mode: darkToggle.checked });
+});
+
+autoNextPick.addEventListener("click", async () => {
+    if (typeof chrome !== "undefined" && chrome.tabs) {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab) {
+            chrome.tabs.sendMessage(tab.id, { type: "START_PICKER" });
+            window.close();
+        }
+    }
+});
+
+function applyAutoNext() {
+    autoNextConfig.style.display = autoNextToggle.checked ? "flex" : "none";
+}
+
+autoNextToggle.addEventListener("change", () => {
+    applyAutoNext();
+    saveSync({ auto_next: autoNextToggle.checked });
+});
+
+autoNextSelector.addEventListener("input", () => {
+    saveSync({ auto_next_selector: autoNextSelector.value });
+});
+
+document.getElementById("autoNextSkip").addEventListener("input", (e) => {
+    const val = parseInt(e.target.value, 10);
+    saveSync({ auto_next_skip: isNaN(val) ? 0 : val });
 });
 
 // --- Service certificate (false = never, true = when used) ---
@@ -464,33 +497,37 @@ function renderInto(entry) {
     keyContainer.prepend(renderKeyEntry(entry, settings));
 }
 
-function loadKeys() {
+async function loadKeys() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     chrome.storage.local.get(null, (map) => {
         const list = entriesFromMap(map);
         keyContainer.innerHTML = "";
 
-        const now = new Date().getTime();
-        const recentKeys = list.filter(e => (now - e.timestamp) / 1_000 <= 5 * 60);
+        const tabKeys = tab ? list.filter(e => e.tabId === tab.id) : list;
 
-        if (!recentKeys.length) {
+        if (!tabKeys.length) {
             keysEmptyState();
             return;
         }
-        recentKeys.forEach((e) => keyContainer.append(renderKeyEntry(e, settings)));
+        tabKeys.forEach((e) => keyContainer.append(renderKeyEntry(e, settings)));
     });
 }
 
 function onStorageChanged(changes, areaName) {
     if (areaName === "local") {
-        for (const [pssh, change] of Object.entries(changes)) {
-            if (change.newValue) {
-                renderInto(change.newValue);
-            } else {
-                const el = keyContainer.querySelector('.key-item[data-pssh="' + CSS.escape(pssh) + '"]');
-                if (el) el.remove();
+        chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+            for (const [pssh, change] of Object.entries(changes)) {
+                if (change.newValue) {
+                    if (!tab || change.newValue.tabId === tab.id) {
+                        renderInto(change.newValue);
+                    }
+                } else {
+                    const el = keyContainer.querySelector('.key-item[data-pssh="' + CSS.escape(pssh) + '"]');
+                    if (el) el.remove();
+                }
             }
-        }
-        if (!keyContainer.querySelector(".key-item")) keysEmptyState();
+            if (!keyContainer.querySelector(".key-item")) keysEmptyState();
+        });
     } else if (areaName === "sync") {
         for (const [key, change] of Object.entries(changes)) {
             settings[key] = change.newValue;
@@ -504,6 +541,12 @@ function loadSettings() {
         enabled.checked = !!(settings.enabled ?? true);
         applyEnabled();
         applyTheme(!!settings.dark_mode);
+        autoNextToggle.checked = !!settings.auto_next;
+        autoNextSelector.value = settings.auto_next_selector || "";
+        if (typeof settings.auto_next_skip !== "undefined") {
+            document.getElementById("autoNextSkip").value = settings.auto_next_skip;
+        }
+        applyAutoNext();
         if (settings.device_type === "REMOTE") remoteSelect.checked = true;
         else wvdSelect.checked = true;
         applyDeviceType();
@@ -524,11 +567,13 @@ function loadSettings() {
 }
 
 if (openHistoryBtn) {
-    openHistoryBtn.addEventListener("click", () => {
+    openHistoryBtn.addEventListener("click", async () => {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tabParam = tab ? "?tabId=" + tab.id : "";
         const url =
             typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL
-                ? chrome.runtime.getURL("ui/history.html")
-                : "history.html";
+                ? chrome.runtime.getURL("ui/history.html" + tabParam)
+                : "history.html" + tabParam;
         if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.create) {
             chrome.tabs.create({ url });
         } else {

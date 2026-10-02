@@ -5,6 +5,60 @@ let settings;
 
 const frameId = `[${Math.random().toString(36).slice(2)}]`;
 
+// Spoof Page Visibility API so video players continue loading in background tabs
+try {
+    Object.defineProperty(Document.prototype, 'visibilityState', { get: () => 'visible', configurable: true });
+    Object.defineProperty(Document.prototype, 'hidden', { get: () => false, configurable: true });
+} catch (e) {
+    try {
+        Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+        Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+    } catch (e2) {}
+}
+try {
+    document.hasFocus = () => true;
+} catch (e) {}
+
+const blockVisibilityChange = (e) => {
+    if (e.type === 'visibilitychange') e.stopImmediatePropagation();
+};
+window.addEventListener('visibilitychange', blockVisibilityChange, true);
+document.addEventListener('visibilitychange', blockVisibilityChange, true);
+
+let settingsPromise = null;
+async function getSettings() {
+    if (!settings) {
+        if (!settingsPromise) {
+            settingsPromise = Util.emit("SETTINGS", null);
+        }
+        settings = await settingsPromise;
+    }
+    return settings;
+}
+
+function getBestTitle() {
+    let t = document.title || "";
+    try {
+        const udemyItem = document.querySelector('[class*="curriculum-item--is-current"] [data-purpose="item-title"]');
+        if (udemyItem && udemyItem.textContent && udemyItem.textContent.trim().length > 0) {
+            return udemyItem.textContent.trim();
+        }
+        const udemySection = document.querySelector('section[class*="lecture-view"][aria-label]');
+        if (udemySection && udemySection.getAttribute('aria-label')) {
+            return udemySection.getAttribute('aria-label');
+        }
+        const h1 = document.querySelector('h1');
+        if (h1 && (h1.innerText || h1.textContent)) {
+            const h1Text = (h1.innerText || h1.textContent).trim();
+            if (h1Text.length > 0) {
+                if (t && t.includes(h1Text)) return t;
+                return h1Text + (t ? " - " + t : "");
+            }
+        }
+    } catch (e) {}
+    return t;
+}
+
 const cdmSessions = new Map();
 
 const mediaKeysServerCertMap = new Map();
@@ -93,7 +147,7 @@ async function parseWidevineChallenge(license, mediaKeySession) {
             timestamp: new Date().getTime(),
             type: "WIDEVINE",
             url: window.location.href,
-            title: document.title
+            title: getBestTitle()
         });
 
         cdmSessions.delete(requestId);
@@ -180,15 +234,13 @@ function parseClearKeyResponse(license) {
         kids: clearKey["keys"].map(key => key.kid)
     }));
 
-    console.log("[WVP2]", frameId, "ClearKey Keys", keys);
-
     Util.emit("KEYS", {
         keys: keys,
         pssh_data: psshData,
         timestamp: new Date().getTime(),
         type: "CLEARKEY",
         url: window.location.href,
-        title: document.title
+        title: getBestTitle()
     });
 }
 
@@ -237,6 +289,9 @@ if (typeof MediaKeySession !== "undefined") {
         }
 
         const resignChallenge = async (message, serverCert) => {
+            const currentSettings = await getSettings();
+            if (!currentSettings) return message;
+
             try {
                 // If we don't fail to parse the message as JSON it's ClearKey and we don't continue
                 const text = new TextDecoder().decode(message);
@@ -246,9 +301,9 @@ if (typeof MediaKeySession !== "undefined") {
                 // ignored
             }
 
-            if (settings.device_type === "WVD") {
+            if (currentSettings.device_type === "WVD") {
                 return getWidevineChallengeLocal(message, serverCert);
-            } else if (settings.device_type === "REMOTE") {
+            } else if (currentSettings.device_type === "REMOTE") {
                 return await getLicenseChallengeRemote(message, serverCert);
             }
             return message;
@@ -266,6 +321,9 @@ if (typeof MediaKeySession !== "undefined") {
                 args: Util.safeStringify(e.message)
             });
 
+            const currentSettings = await getSettings();
+            const proxyMode = currentSettings?.proxy_mode ?? "event";
+
             const serverCert = getServerCert(type === "object" ? _thisTarget : _this);
             const newChallenge = await resignChallenge(e.message, serverCert);
 
@@ -274,14 +332,14 @@ if (typeof MediaKeySession !== "undefined") {
             }
 
             console.log("[WVP2]", "New challenge:", Util.b64.encode(newChallenge));
-            console.log("[WVP2]", frameId, `Intercepted (${settings.proxy_mode}/${type})`, _args[0]);
+            console.log("[WVP2]", frameId, `Intercepted (${proxyMode}/${type})`, _args[0]);
 
-            if (settings.proxy_mode === "property") {
+            if (proxyMode === "property") {
                 Object.defineProperty(e, "message", {
                     configurable: true,
                     get: () => new Uint8Array(newChallenge).buffer
                 });
-            } else if (settings.proxy_mode === "event") {
+            } else if (proxyMode === "event") {
                 const clonedEvent = new MediaKeyMessageEvent("message", {
                     messageType: e.messageType,
                     message: new Uint8Array(newChallenge).buffer

@@ -46,9 +46,14 @@ async function setIsOutdated() {
 let registrationPromise = null;
 
 async function getEnabledState() {
-    const { enabled } = await chrome.storage.sync.get("enabled");
-    const { selected } = await chrome.storage.sync.get("selected");
-    return !!(enabled ?? true) && !!selected;
+    const { enabled, selected, selected_remote_cdm, device_type } = await chrome.storage.sync.get(["enabled", "selected", "selected_remote_cdm", "device_type"]);
+    const isEnabled = enabled ?? true;
+    if (!isEnabled) return false;
+    const deviceType = device_type ?? "WVD";
+    if (deviceType === "REMOTE") {
+        return !!selected_remote_cdm;
+    }
+    return !!selected;
 }
 
 async function registerScripts() {
@@ -186,6 +191,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "OPEN_PICKER_REMOTE_MOBILE":
             openPicker("picker/remote/filePicker.html", true);
             break;
+        case "GET_TAB_ID":
+            sendResponse({ data: sender.tab ? sender.tab.id : -1 });
+            break;
         case "IS_OUTDATED":
             sendResponse(isOutdated);
             break;
@@ -229,56 +237,52 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
 chrome.runtime.onInstalled.addListener(() => {
     ensureScriptsRegistered();
+    updateBadge();
 });
 
 chrome.runtime.onStartup.addListener(() => {
     ensureScriptsRegistered();
+    updateBadge();
 });
 
-async function setIcon(type) {
-    const p = type === "red" ? "-red" : "";
-    await chrome.action.setIcon({
-        path: {
-            16: `../../images/icon-16${p}.png`,
-            32: `../../images/icon-32${p}.png`,
-            64: `../../images/icon-64${p}.png`,
-            128: `../../images/icon-128${p}.png`,
-        }
-    });
-}
+async function updateBadge() {
+    const data = await chrome.storage.local.get(null);
+    const tabs = await chrome.tabs.query({});
+    const tabCounts = {};
 
-let timeoutId = null;
+    for (const key in data) {
+        const tabId = data[key].tabId;
+        if (tabId !== undefined && tabId !== -1) {
+            tabCounts[tabId] = (tabCounts[tabId] || 0) + 1;
+        }
+    }
+
+    // Set per-tab badges
+    for (const tab of tabs) {
+        const count = tabCounts[tab.id] || 0;
+        if (count > 0) {
+            chrome.action.setBadgeText({ text: count.toString(), tabId: tab.id }).catch(() => {});
+            chrome.action.setBadgeBackgroundColor({ color: "#d11124", tabId: tab.id }).catch(() => {});
+        } else {
+            chrome.action.setBadgeText({ text: "", tabId: tab.id }).catch(() => {});
+        }
+    }
+
+    // Fallback global badge (optional, maybe empty)
+    chrome.action.setBadgeText({ text: "" }).catch(() => {});
+}
 
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
     if (areaName === "local") {
-        const added = Object.values(changes).some(
-            ({ oldValue, newValue }) =>
-                oldValue === undefined && newValue !== undefined
-        );
-
-        if (added) {
-            await setIcon("red");
-
-            if (timeoutId)
-                clearTimeout(timeoutId);
-
-            timeoutId = setTimeout(async () => {
-                timeoutId = null;
-                await setIcon("normal");
-            }, 60 * 1000);
-        }
+        await updateBadge();
     } else if (areaName === "sync") {
         ensureScriptsRegistered();
     }
 });
 
-chrome.runtime.onSuspend.addListener(async () => {
-    await setIcon("normal");
-});
-
 setTimeout(() => {
     ensureScriptsRegistered();
+    updateBadge();
     setIsOutdated();
     setInterval(setIsOutdated, 12 * 60 * 60 * 1000); // 12 hours
 }, 1000);
-

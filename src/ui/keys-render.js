@@ -160,12 +160,12 @@ export function renderKeyEntry(entry, settings, onDelete) {
     const caret = document.createElement("span");
     caret.className = "key-caret";
     caret.textContent = "▸";
-    // page URL
-    const url = document.createElement("span");
-    url.className = "key-url";
-    url.textContent = entry.url || "(unknown page)";
-    url.title = entry.url || "";
-    head.append(caret, url);
+    // page Title or URL
+    const titleText = document.createElement("span");
+    titleText.className = "key-url"; // keep same class for styling
+    titleText.textContent = entry.title || entry.url || "(unknown page)";
+    titleText.title = entry.url || "";
+    head.append(caret, titleText);
 
     if (entry.type) {
         const typePill = document.createElement("span");

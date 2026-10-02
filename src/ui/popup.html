@@ -38,6 +38,21 @@
                     </label>
                     <label for="darkModeToggle">Dark mode</label>
                 </div>
+                <div class="opt-row">
+                    <label class="switch">
+                        <input type="checkbox" id="autoNextToggle">
+                        <span class="slider"></span>
+                    </label>
+                    <label for="autoNextToggle">Auto next</label>
+                </div>
+            </div>
+            <div class="opt-row toggle-row" id="autoNextConfig" style="display: none; flex-direction: column; align-items: stretch; margin-top: 8px;">
+                <span class="minilabel inline set-label" style="margin-bottom: 4px;">Auto next CSS selector</span>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" class="text-box" id="autoNextSelector" placeholder=".next-button, #next-episode" style="width: 100%;">
+                    <button type="button" id="autoNextPick" class="head-btn" style="white-space: nowrap; padding: 0 8px;">Pick on Page</button>
+                    <input type="number" id="autoNextSkip" placeholder="Skip timeout (s)" title="Seconds to wait before auto-skipping a non-video page (0 to disable)" style="width: 100px;" min="0">
+                </div>
             </div>
             <div class="opt-row toggle-row">
                 <span class="minilabel inline set-label">Proxy mode</span>
